@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import prisma from "@/lib/db/prisma";
 import { requireRole, routeError } from "@/lib/auth/guard";
-import { Role } from "@prisma/client";
+import { Prisma, Role } from "@prisma/client";
 
 export const dynamic = "force-dynamic";
 
@@ -244,37 +244,58 @@ export async function POST(req: NextRequest) {
         });
       }
 
-      // Parents before children, so foreign keys always resolve.
+      /*
+       * Rows are matched by identity first and by their natural key second.
+       *
+       * An archive restored onto a machine that already has a menu - one that was
+       * seeded before the restore, say - carries the same category names and product
+       * SKUs under different ids. Matching on id alone made those collide with the
+       * unique indexes and failed the whole restore, so each entity is also looked up
+       * by whatever uniquely identifies it to a human.
+       */
+      const categoryIdMap = new Map<string, string>();
+
       for (const category of backup.categories) {
-        await tx.category.upsert({
-          where: { id: category.id },
-          update: {
-            name: category.name,
-            slug: category.slug,
-            sortOrder: category.sortOrder,
-            isActive: category.isActive,
-            icon: category.icon ?? null,
-          },
-          create: {
-            id: category.id,
-            name: category.name,
-            slug: category.slug,
-            sortOrder: category.sortOrder,
-            isActive: category.isActive,
-            icon: category.icon ?? null,
-          },
+        const existing = await tx.category.findFirst({
+          where: { OR: [{ id: category.id }, { slug: category.slug }, { name: category.name }] },
         });
+
+        const fields = {
+          name: category.name,
+          slug: category.slug,
+          sortOrder: category.sortOrder,
+          isActive: category.isActive,
+          icon: category.icon ?? null,
+        };
+
+        if (existing) {
+          await tx.category.update({ where: { id: existing.id }, data: fields });
+          categoryIdMap.set(category.id, existing.id);
+        } else {
+          const created = await tx.category.create({ data: { id: category.id, ...fields } });
+          categoryIdMap.set(category.id, created.id);
+        }
       }
 
-      const knownCategoryIds = new Set((await tx.category.findMany({ select: { id: true } })).map((c) => c.id));
+      const productIdMap = new Map<string, string>();
 
       for (const product of backup.products) {
-        if (!knownCategoryIds.has(product.categoryId)) continue; // orphan, skip rather than fail
+        const categoryId = categoryIdMap.get(product.categoryId);
+        if (!categoryId) continue; // category was not in the archive; skip the orphan
+
+        // Null SKUs and barcodes must not be used to match, or every product without
+        // one would look like the same product.
+        const identifiers: Array<Record<string, string>> = [{ id: product.id }];
+        if (product.sku) identifiers.push({ sku: product.sku });
+        if (product.barcode) identifiers.push({ barcode: product.barcode });
+
+        const existing = await tx.product.findFirst({ where: { OR: identifiers } });
+
         const fields = {
           name: product.name,
           description: product.description ?? null,
           price: product.price,
-          categoryId: product.categoryId,
+          categoryId,
           image: product.image ?? null,
           sku: product.sku ?? null,
           barcode: product.barcode ?? null,
@@ -282,107 +303,120 @@ export async function POST(req: NextRequest) {
           isAvailable: product.isAvailable,
           sortOrder: product.sortOrder,
         };
-        await tx.product.upsert({
-          where: { id: product.id },
-          update: fields,
-          create: { id: product.id, ...fields },
-        });
+
+        if (existing) {
+          await tx.product.update({ where: { id: existing.id }, data: fields });
+          productIdMap.set(product.id, existing.id);
+        } else {
+          const created = await tx.product.create({ data: { id: product.id, ...fields } });
+          productIdMap.set(product.id, created.id);
+        }
       }
 
-      const knownProductIds = new Set((await tx.product.findMany({ select: { id: true } })).map((p) => p.id));
+      /*
+       * Option groups have no natural key, so the archive is taken as authoritative:
+       * the groups of every product it describes are rebuilt from scratch. Order lines
+       * keep the option name and price they were sold at, so history is unaffected.
+       */
+      const restoredProductIds = [...productIdMap.values()];
+      if (restoredProductIds.length > 0) {
+        await tx.modifierGroup.deleteMany({ where: { productId: { in: restoredProductIds } } });
+      }
+
+      const groupIdMap = new Map<string, string>();
 
       for (const group of backup.modifierGroups) {
-        if (group.productId && !knownProductIds.has(group.productId)) continue;
-        const fields = {
-          name: group.name,
-          minSelection: group.minSelection,
-          maxSelection: group.maxSelection,
-          isRequired: group.isRequired,
-          productId: group.productId ?? null,
-        };
-        await tx.modifierGroup.upsert({
-          where: { id: group.id },
-          update: fields,
-          create: { id: group.id, ...fields },
+        const productId = group.productId ? productIdMap.get(group.productId) : null;
+        if (group.productId && !productId) continue; // belonged to a product not restored
+
+        const created = await tx.modifierGroup.create({
+          data: {
+            name: group.name,
+            minSelection: group.minSelection,
+            maxSelection: group.maxSelection,
+            isRequired: group.isRequired,
+            productId: productId ?? null,
+          },
         });
+        groupIdMap.set(group.id, created.id);
       }
 
-      const knownGroupIds = new Set(
-        (await tx.modifierGroup.findMany({ select: { id: true } })).map((g) => g.id)
-      );
-
       for (const modifier of backup.modifiers) {
-        if (!knownGroupIds.has(modifier.modifierGroupId)) continue;
-        const fields = {
-          modifierGroupId: modifier.modifierGroupId,
-          name: modifier.name,
-          price: modifier.price,
-          isAvailable: modifier.isAvailable,
-        };
-        await tx.modifier.upsert({
-          where: { id: modifier.id },
-          update: fields,
-          create: { id: modifier.id, ...fields },
+        const modifierGroupId = groupIdMap.get(modifier.modifierGroupId);
+        if (!modifierGroupId) continue;
+
+        await tx.modifier.create({
+          data: {
+            modifierGroupId,
+            name: modifier.name,
+            price: modifier.price,
+            isAvailable: modifier.isAvailable,
+          },
         });
       }
 
       for (const table of backup.tables) {
-        await tx.restaurantTable.upsert({
-          where: { id: table.id },
-          update: { name: table.name, capacity: table.capacity },
-          // A restored table always starts free; its live status is not archive data.
-          create: { id: table.id, name: table.name, capacity: table.capacity },
+        const existing = await tx.restaurantTable.findFirst({
+          where: { OR: [{ id: table.id }, { name: table.name }] },
         });
+        if (existing) {
+          await tx.restaurantTable.update({
+            where: { id: existing.id },
+            data: { name: table.name, capacity: table.capacity },
+          });
+        } else {
+          // A restored table always starts free; live status is not archive data.
+          await tx.restaurantTable.create({
+            data: { id: table.id, name: table.name, capacity: table.capacity },
+          });
+        }
       }
 
       for (const customer of backup.customers) {
-        await tx.customer.upsert({
-          where: { id: customer.id },
-          update: {
-            name: customer.name,
-            address: customer.address ?? null,
-            notes: customer.notes ?? null,
-          },
-          create: {
-            id: customer.id,
-            name: customer.name,
-            phone: customer.phone,
-            address: customer.address ?? null,
-            notes: customer.notes ?? null,
-          },
+        const existing = await tx.customer.findFirst({
+          where: { OR: [{ id: customer.id }, { phone: customer.phone }] },
         });
+        const fields = {
+          name: customer.name,
+          address: customer.address ?? null,
+          notes: customer.notes ?? null,
+        };
+        if (existing) {
+          await tx.customer.update({ where: { id: existing.id }, data: fields });
+        } else {
+          await tx.customer.create({
+            data: { id: customer.id, phone: customer.phone, ...fields },
+          });
+        }
       }
 
       for (const waiter of backup.waiters) {
-        await tx.waiter.upsert({
-          where: { id: waiter.id },
-          update: { name: waiter.name, phone: waiter.phone ?? null, isActive: waiter.isActive },
-          create: {
-            id: waiter.id,
-            name: waiter.name,
-            phone: waiter.phone ?? null,
-            isActive: waiter.isActive,
-          },
+        const existing = await tx.waiter.findFirst({
+          where: { OR: [{ id: waiter.id }, { name: waiter.name }] },
         });
+        const fields = { name: waiter.name, phone: waiter.phone ?? null, isActive: waiter.isActive };
+        if (existing) {
+          await tx.waiter.update({ where: { id: existing.id }, data: fields });
+        } else {
+          await tx.waiter.create({ data: { id: waiter.id, ...fields } });
+        }
       }
 
       for (const rider of backup.riders) {
-        await tx.rider.upsert({
-          where: { id: rider.id },
-          update: {
-            name: rider.name,
-            phone: rider.phone ?? null,
-            vehicleNo: rider.vehicleNo ?? null,
-            isActive: rider.isActive,
-          },
-          create: {
-            id: rider.id,
-            name: rider.name,
-            phone: rider.phone ?? null,
-            vehicleNo: rider.vehicleNo ?? null,
-            isActive: rider.isActive,
-          },
+        const existing = await tx.rider.findFirst({
+          where: { OR: [{ id: rider.id }, { name: rider.name }] },
         });
+        const fields = {
+          name: rider.name,
+          phone: rider.phone ?? null,
+          vehicleNo: rider.vehicleNo ?? null,
+          isActive: rider.isActive,
+        };
+        if (existing) {
+          await tx.rider.update({ where: { id: existing.id }, data: fields });
+        } else {
+          await tx.rider.create({ data: { id: rider.id, ...fields } });
+        }
       }
 
       await tx.auditLog.create({
@@ -400,8 +434,9 @@ export async function POST(req: NextRequest) {
       });
 
       return {
-        categories: backup.categories.length,
-        products: backup.products.length,
+        categories: categoryIdMap.size,
+        products: productIdMap.size,
+        optionGroups: groupIdMap.size,
         tables: backup.tables.length,
         customers: backup.customers.length,
         waiters: backup.waiters.length,
@@ -416,10 +451,32 @@ export async function POST(req: NextRequest) {
         counts.products +
         " products across " +
         counts.categories +
-        " categories. Trading history was not replayed.",
+        " categories, with " +
+        counts.optionGroups +
+        " option groups. Trading history was not replayed.",
       counts,
     });
   } catch (error) {
-    return routeError("backup.POST", error, "Failed to restore backup archive. Verify file integrity.");
+    // P2002 means a name, SKU or barcode in the archive is already used by a different
+    // row here. Saying "verify file integrity" would send the operator after the wrong
+    // problem - the file is fine, the database simply already holds conflicting data.
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      const fields = (error.meta?.target as string[] | undefined)?.join(", ") ?? "a unique field";
+      console.error("[backup.POST] restore conflict on " + fields, error);
+      return NextResponse.json(
+        {
+          error:
+            "This database already contains an item that clashes with the archive (" +
+            fields +
+            "). Nothing was changed. Restore into a fresh installation, or clear the " +
+            "conflicting menu item first.",
+        },
+        { status: 409 }
+      );
+    }
+    return routeError("backup.POST", error, "Failed to restore the archive. Nothing was changed.");
   }
 }

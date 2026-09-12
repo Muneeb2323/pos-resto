@@ -445,6 +445,61 @@ async function main() {
     check("a group requiring more than it offers -> 400", badEdit.status === 400, "got " + badEdit.status);
   }
 
+  section("Backup export and restore");
+  const exportRes = await fetch(BASE + "/api/backup", { headers: { Cookie: cookie } });
+  check("GET /api/backup -> 200", exportRes.status === 200, "got " + exportRes.status);
+
+  const archiveText = await exportRes.text();
+  let archive = null;
+  try {
+    archive = JSON.parse(archiveText);
+  } catch {
+    check("archive is valid JSON", false);
+  }
+
+  if (archive) {
+    check("archive names the system", String(archive.meta?.system || "").includes("FORK & FIRE"));
+    check("archive carries the menu", archive.products.length > 0);
+    check("archive carries option groups", archive.modifierGroups.length > 0);
+    check("archive carries the option choices", archive.modifiers.length > 0);
+    check("archive carries staff", Array.isArray(archive.waiters) && Array.isArray(archive.riders));
+
+    const productsBefore = (await api("/api/products?all=true")).body.length;
+
+    // Restoring an installation's own archive must change nothing. This is the path a
+    // new PC takes, and it must not duplicate a menu that is already there.
+    const restore = await api("/api/backup", { method: "POST", body: archiveText });
+    check("restore -> 200", restore.status === 200, JSON.stringify(restore.body));
+
+    const productsAfter = (await api("/api/products?all=true")).body;
+    check(
+      "restoring onto an existing menu does not duplicate it",
+      productsAfter.length === productsBefore,
+      productsBefore + " -> " + productsAfter.length
+    );
+
+    const names = productsAfter.map((p) => p.name);
+    check(
+      "no duplicated product names after restore",
+      new Set(names).size === names.length
+    );
+
+    const withOptions = productsAfter.find((p) => (p.modifierGroups || []).length > 0);
+    check("option groups survived the restore", !!withOptions);
+
+    const rubbish = await api("/api/backup", {
+      method: "POST",
+      body: JSON.stringify({ meta: { system: "Some Other POS" }, products: [] }),
+    });
+    check("an archive from another system is refused", rubbish.status === 400, "got " + rubbish.status);
+
+    const malformed = await api("/api/backup", {
+      method: "POST",
+      body: JSON.stringify({ meta: { system: "FORK & FIRE" }, products: [{ name: "no id" }] }),
+    });
+    check("a malformed archive is refused", malformed.status === 400, "got " + malformed.status);
+  }
+
   section("Sign-out");
   const logout = await api("/api/auth/logout", { method: "POST" });
   check("POST /api/auth/logout -> 200", logout.status === 200);
