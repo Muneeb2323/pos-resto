@@ -1,0 +1,435 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  CASHIER
+  KITCHEN
+}
+
+enum TableStatus {
+  AVAILABLE
+  OCCUPIED
+  RESERVED
+}
+
+enum OrderType {
+  DINE_IN
+  TAKEAWAY
+  PICKUP
+  DELIVERY
+}
+
+enum OrderStatus {
+  NEW
+  PREPARING
+  READY
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  PARTIALLY_PAID
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  BANK_TRANSFER
+  OTHER
+}
+
+enum KitchenStatus {
+  NEW
+  PREPARING
+  READY
+  COMPLETED
+}
+
+enum RegisterStatus {
+  OPEN
+  CLOSED
+}
+
+enum ExpenseCategory {
+  PACKAGING
+  CLEANING
+  ELECTRICITY
+  MAINTENANCE
+  MISCELLANEOUS
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(CASHIER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  orders    Order[]
+  sessions  RegisterSession[]
+  expenses  Expense[]
+  auditLogs AuditLog[]
+
+  @@index([username])
+  @@index([role])
+}
+
+model RestaurantSettings {
+  id                  String   @id @default("singleton")
+  restaurantName      String   @default("FORK & FIRE")
+  tagline             String   @default("Fast Food & Grill")
+  address             String   @default("Plot 14-C, Main Commercial Boulevard, Phase 6, DHA")
+  phone               String   @default("+92 300 1234567")
+  currency            String   @default("PKR")
+  currencySymbol      String   @default("Rs. ")
+  taxRate             Decimal  @default(5.0) @db.Decimal(5, 2)
+  receiptHeader       String   @default("Welcome to Fork & Fire\nQuality & Taste in Every Bite")
+  receiptFooter       String   @default("Thank you for dining with us!\nVisit again soon.")
+  /// Shown on the customer bill (the pre-payment invoice) only. Free text, one
+  /// account per line, so the numbers can change without a code change.
+  onlinePaymentInfo   String?  @db.Text
+  orderNumberPrefix   String   @default("#")
+  warningKitchenTime  Int      @default(10) // minutes
+  criticalKitchenTime Int      @default(20) // minutes
+  printerName         String   @default("Black Copper BC-85AC") /// Windows spooler queue name
+  printerType         String   @default("thermal_80mm")
+  paperWidth          Int      @default(80) // mm
+  autoPrintReceipt    Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model Category {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  slug      String   @unique
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  icon      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+
+  @@index([slug])
+  @@index([sortOrder])
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  price       Decimal  @db.Decimal(10, 2)
+  categoryId  String
+  image       String?
+  sku         String?  @unique
+  barcode     String?  @unique
+  isActive    Boolean  @default(true)
+  isAvailable Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  category       Category        @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  modifierGroups ModifierGroup[]
+  orderItems     OrderItem[]
+
+  @@index([categoryId])
+  @@index([sku])
+  @@index([barcode])
+  @@index([isActive, isAvailable])
+}
+
+model ModifierGroup {
+  id           String   @id @default(cuid())
+  name         String
+  minSelection Int      @default(0)
+  maxSelection Int      @default(1)
+  isRequired   Boolean  @default(false)
+  productId    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  product   Product?   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  modifiers Modifier[]
+
+  @@index([productId])
+}
+
+model Modifier {
+  id              String   @id @default(cuid())
+  modifierGroupId String
+  name            String
+  price           Decimal  @default(0.0) @db.Decimal(10, 2)
+  isAvailable     Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  group          ModifierGroup       @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  orderModifiers OrderItemModifier[]
+
+  @@index([modifierGroupId])
+}
+
+model RestaurantTable {
+  id             String      @id @default(cuid())
+  name           String      @unique // e.g. "Table 1"
+  capacity       Int         @default(4)
+  status         TableStatus @default(AVAILABLE)
+  currentOrderId String?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  orders Order[]
+
+  @@index([status])
+}
+
+model Customer {
+  id          String    @id @default(cuid())
+  name        String
+  phone       String    @unique
+  address     String?
+  notes       String?
+  orderCount  Int       @default(0)
+  totalSpent  Decimal   @default(0.0) @db.Decimal(12, 2)
+  lastOrderAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  orders Order[]
+
+  @@index([phone])
+}
+
+model Order {
+  id            String      @id @default(cuid())
+  orderNumber   String      @unique // e.g. "#1001"
+  orderSequence Int         @default(autoincrement())
+  orderType     OrderType   @default(DINE_IN)
+  status        OrderStatus @default(NEW)
+  tableId       String?
+  customerId    String?
+  cashierId     String?
+  waiterId      String?
+  riderId       String?
+
+  // Snapshots at time of order, so a receipt still names the staff member
+  // who served it even after that person leaves and the record is removed.
+  waiterName String?
+  riderName  String?
+
+  subtotal       Decimal @db.Decimal(10, 2)
+  discountAmount Decimal @default(0.0) @db.Decimal(10, 2)
+  discountReason String?
+  taxAmount      Decimal @default(0.0) @db.Decimal(10, 2)
+  deliveryCharge Decimal @default(0.0) @db.Decimal(10, 2)
+  grandTotal     Decimal @db.Decimal(10, 2)
+
+  paymentStatus        PaymentStatus @default(UNPAID)
+  orderNotes           String?
+  deliveryAddress      String?
+  deliveryInstructions String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  table        RestaurantTable? @relation(fields: [tableId], references: [id])
+  customer     Customer?        @relation(fields: [customerId], references: [id])
+  cashier      User?            @relation(fields: [cashierId], references: [id])
+  waiter       Waiter?          @relation(fields: [waiterId], references: [id], onDelete: SetNull)
+  rider        Rider?           @relation(fields: [riderId], references: [id], onDelete: SetNull)
+  items        OrderItem[]
+  payments     Payment[]
+  kitchenOrder KitchenOrder?
+
+  @@index([orderNumber])
+  @@index([status])
+  @@index([orderType])
+  @@index([paymentStatus])
+  @@index([createdAt])
+  @@index([tableId])
+  @@index([customerId])
+  @@index([waiterId])
+  @@index([riderId])
+}
+
+/// Front-of-house table service staff, selectable on dine-in orders.
+model Waiter {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
+
+  @@index([isActive])
+  @@index([createdAt])
+}
+
+/// Delivery personnel, selectable on delivery orders.
+model Rider {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String?
+  vehicleNo String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
+
+  @@index([isActive])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id          String   @id @default(cuid())
+  orderId     String
+  productId   String?
+  productName String // Snapshot at time of order!
+  unitPrice   Decimal  @db.Decimal(10, 2) // Snapshot at time of order!
+  quantity    Int      @default(1)
+  itemTotal   Decimal  @db.Decimal(10, 2)
+  notes       String?
+  createdAt   DateTime @default(now())
+
+  order     Order               @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product   Product?            @relation(fields: [productId], references: [id])
+  modifiers OrderItemModifier[]
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model OrderItemModifier {
+  id           String   @id @default(cuid())
+  orderItemId  String
+  modifierId   String?
+  modifierName String // Snapshot at time of order!
+  unitPrice    Decimal  @default(0.0) @db.Decimal(10, 2) // Snapshot at time of order!
+  createdAt    DateTime @default(now())
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  modifier  Modifier? @relation(fields: [modifierId], references: [id])
+
+  @@index([orderItemId])
+}
+
+model Payment {
+  id              String        @id @default(cuid())
+  orderId         String
+  paymentMethod   PaymentMethod @default(CASH)
+  amount          Decimal       @db.Decimal(10, 2)
+  amountReceived  Decimal       @default(0.0) @db.Decimal(10, 2)
+  changeGiven     Decimal       @default(0.0) @db.Decimal(10, 2)
+  referenceNumber String?
+  status          String        @default("SUCCESS") // SUCCESS, REFUNDED
+  createdAt       DateTime      @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([paymentMethod])
+  @@index([createdAt])
+}
+
+model KitchenOrder {
+  id             String        @id @default(cuid())
+  orderId        String        @unique
+  status         KitchenStatus @default(NEW)
+  startedAt      DateTime?
+  readyAt        DateTime?
+  completedAt    DateTime?
+  elapsedWarning Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model RegisterSession {
+  id            String         @id @default(cuid())
+  userId        String
+  openingCash   Decimal        @default(0.0) @db.Decimal(10, 2)
+  closingCash   Decimal?       @db.Decimal(10, 2)
+  expectedCash  Decimal?       @db.Decimal(10, 2)
+  difference    Decimal?       @db.Decimal(10, 2)
+  cashSales     Decimal        @default(0.0) @db.Decimal(10, 2)
+  cashRefunds   Decimal        @default(0.0) @db.Decimal(10, 2)
+  expensesTotal Decimal        @default(0.0) @db.Decimal(10, 2)
+  status        RegisterStatus @default(OPEN)
+  openedAt      DateTime       @default(now())
+  closedAt      DateTime?
+  notes         String?
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status])
+  @@index([openedAt])
+}
+
+model Expense {
+  id          String          @id @default(cuid())
+  description String
+  category    ExpenseCategory @default(MISCELLANEOUS)
+  amount      Decimal         @db.Decimal(10, 2)
+  date        DateTime        @default(now())
+  userId      String
+  notes       String?
+  createdAt   DateTime        @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([category])
+  @@index([date])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  details   String?  @db.Text
+  ipAddress String?
+  timestamp DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([action])
+  @@index([entity])
+  @@index([timestamp])
+}
+
+model BackupRecord {
+  id          String   @id @default(cuid())
+  filename    String
+  fileSize    Int
+  recordCount Int
+  status      String   @default("SUCCESS")
+  createdAt   DateTime @default(now())
+}

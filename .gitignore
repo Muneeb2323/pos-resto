@@ -39,3 +39,20 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Bundled portable PostgreSQL binaries (818 MB) - install separately, never commit
+/pgsql/
+
+# Live PostgreSQL data cluster - committing this corrupts the database
+/data/
+
+# PostgreSQL logs
+pg_logfile.log
+*.log
+
+# Generated launcher binaries
+START_FORK_AND_FIRE.exe
+/logo.ico
+
+# Runtime markers
+/prisma/.purged_transactions

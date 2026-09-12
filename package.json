@@ -1,23 +1,58 @@
 {
-  "name": "pos",
-  "version": "0.1.0",
+  "name": "fork-and-fire-pos",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint .",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:push": "prisma db push",
+    "prisma:seed": "tsx prisma/seed.ts",
+    "db:start": "node scripts/start-db.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "admin:reset": "tsx scripts/reset-admin.ts",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "verify": "npm run typecheck && npm run lint && npm run test",
+    "smoke": "node scripts/smoke-test.mjs",
+    "shortcut": "node scripts/create-shortcut.js",
+    "db:init": "node scripts/init-db.js",
+    "package": "node scripts/package-for-handover.js"
   },
   "dependencies": {
+    "@hookform/resolvers": "^3.10.0",
+    "@prisma/client": "^6.4.1",
+    "bcryptjs": "^3.0.2",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.4.7",
+    "jose": "^6.0.8",
+    "lucide-react": "^1.16.0",
     "next": "16.3.4",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "react-hook-form": "^7.54.2",
+    "recharts": "^2.15.1",
+    "tailwind-merge": "^3.0.2",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.13.5",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
     "babel-plugin-react-compiler": "1.0.0",
+    "dotenv": "^16.6.1",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
-    "tailwindcss": "^4"
+    "prisma": "^6.4.1",
+    "tailwindcss": "^4",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "vitest": "^3.2.7"
   }
 }
